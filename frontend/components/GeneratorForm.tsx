@@ -1,22 +1,15 @@
 'use client'
 
 import { useState, useEffect, useRef } from 'react'
-import { Zap, AlertCircle, CheckCircle2, Loader2, Hash, Mail, Clock } from 'lucide-react'
+import { Zap, AlertCircle, CheckCircle2, Loader2, Hash, Mail, Clock, MapPin } from 'lucide-react'
 import type { Lead } from '../lib/api'
 
 interface GeneratorFormProps {
   onLeadsGenerated?: (leads: Lead[]) => void
 }
 
-// ~0.3s per page (20 results) + 2.5s per lead for email scraping
-function calcEtaSeconds(keywordCount: number, maxPerKeyword: number, scrapeEmails: boolean) {
-  const pages = Math.ceil(maxPerKeyword / 20)
-  const mapsTime = keywordCount * pages * 0.8
-  const emailTime = scrapeEmails ? keywordCount * maxPerKeyword * 2.5 : 0
-  return Math.ceil(mapsTime + emailTime)
-}
-
-function fmtTime(s: number) {
+function fmtTime(ms: number) {
+  const s = Math.ceil(ms / 1000)
   if (s <= 0) return '0s'
   if (s < 60) return `${s}s`
   const m = Math.floor(s / 60)
@@ -24,25 +17,41 @@ function fmtTime(s: number) {
   return rem > 0 ? `${m}m ${rem}s` : `${m}m`
 }
 
+type ProgressEvent =
+  | { type: 'searching'; keyword: string; index: number; total: number }
+  | { type: 'scraping'; keyword: string; index: number; total: number; count: number }
+  | { type: 'keyword_done'; keyword: string; index: number; total: number; found: number; totalSoFar: number; elapsedMs: number; etaMs: number }
+  | { type: 'keyword_error'; keyword: string; index: number; total: number; message: string }
+  | { type: 'saving' }
+  | { type: 'done'; saved: number; skipped: number; leads: Lead[] }
+  | { type: 'error'; message: string }
+
 export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) {
   const [keywords, setKeywords] = useState('')
-  const [maxPerKeyword, setMaxPerKeyword] = useState(20)
   const [scrapeEmails, setScrapeEmails] = useState(false)
   const [loading, setLoading] = useState(false)
   const [elapsed, setElapsed] = useState(0)
+  const [progress, setProgress] = useState<{
+    index: number
+    total: number
+    keyword: string
+    phase: string
+    totalSoFar: number
+    etaMs: number
+  } | null>(null)
   const [result, setResult] = useState<{ count: number; skipped: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const startRef = useRef(0)
 
-  const keywordCount = keywords.split(/[\n,]/).map(k => k.trim()).filter(Boolean).length
-  const eta = calcEtaSeconds(keywordCount, maxPerKeyword, scrapeEmails)
-  const progress = loading ? Math.min((elapsed / eta) * 100, 95) : 0
-  const remaining = Math.max(eta - elapsed, 0)
+  const keywordList = keywords.split(/[\n,]/).map(k => k.trim()).filter(Boolean)
+  const keywordCount = keywordList.length
 
   useEffect(() => {
     if (loading) {
+      startRef.current = Date.now()
       setElapsed(0)
-      timerRef.current = setInterval(() => setElapsed(e => e + 1), 1000)
+      timerRef.current = setInterval(() => setElapsed(Math.floor((Date.now() - startRef.current) / 1000)), 500)
     } else {
       if (timerRef.current) clearInterval(timerRef.current)
     }
@@ -51,37 +60,74 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
 
   async function handleSubmit(e: React.FormEvent) {
     e.preventDefault()
+    if (keywordList.length === 0) {
+      setError('Please enter at least one keyword')
+      return
+    }
+
     setLoading(true)
     setError(null)
     setResult(null)
-
-    const keywordList = keywords
-      .split(/[\n,]/)
-      .map(k => k.trim())
-      .filter(Boolean)
-
-    if (keywordList.length === 0) {
-      setError('Please enter at least one keyword')
-      setLoading(false)
-      return
-    }
+    setProgress(null)
 
     try {
       const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/leads/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keywords: keywordList, maxPerKeyword, scrapeEmails }),
+        body: JSON.stringify({ keywords: keywordList, scrapeEmails }),
       })
-      const data = await res.json()
-      if (!res.ok) throw new Error(data.error || 'Failed to generate leads')
-      setResult({ count: data.count, skipped: data.skipped ?? 0 })
-      onLeadsGenerated?.(data.leads)
+
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({ error: 'Request failed' }))
+        throw new Error(data.error || 'Failed to generate leads')
+      }
+
+      const reader = res.body.getReader()
+      const decoder = new TextDecoder()
+      let buffer = ''
+
+      while (true) {
+        const { done, value } = await reader.read()
+        if (done) break
+        buffer += decoder.decode(value, { stream: true })
+
+        const lines = buffer.split('\n')
+        buffer = lines.pop() ?? ''
+
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue
+          let evt: ProgressEvent
+          try { evt = JSON.parse(line.slice(6)) } catch { continue }
+
+          if (evt.type === 'searching') {
+            setProgress({ index: evt.index, total: evt.total, keyword: evt.keyword, phase: 'searching', totalSoFar: 0, etaMs: 0 })
+          } else if (evt.type === 'scraping') {
+            setProgress(p => p ? { ...p, phase: 'scraping' } : p)
+          } else if (evt.type === 'keyword_done') {
+            setProgress({ index: evt.index, total: evt.total, keyword: evt.keyword, phase: 'done', totalSoFar: evt.totalSoFar, etaMs: evt.etaMs })
+          } else if (evt.type === 'keyword_error') {
+            setProgress(p => p ? { ...p, phase: 'error' } : p)
+          } else if (evt.type === 'saving') {
+            setProgress(p => p ? { ...p, phase: 'saving' } : p)
+          } else if (evt.type === 'done') {
+            setResult({ count: evt.saved, skipped: evt.skipped })
+            onLeadsGenerated?.(evt.leads)
+            setProgress(null)
+          } else if (evt.type === 'error') {
+            setError(evt.message)
+          }
+        }
+      }
     } catch (err: any) {
       setError(err.message)
     } finally {
       setLoading(false)
     }
   }
+
+  const barPct = progress
+    ? Math.min(((progress.index + (progress.phase === 'done' ? 1 : 0.5)) / progress.total) * 100, 98)
+    : 0
 
   return (
     <form onSubmit={handleSubmit} className="space-y-6">
@@ -95,7 +141,7 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
           {keywordCount > 0 ? (
             <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full text-xs font-semibold bg-indigo-50 dark:bg-indigo-500/15 text-indigo-600 dark:text-indigo-400 border border-indigo-100 dark:border-indigo-500/20">
               <Hash className="w-3 h-3" />
-              {keywordCount} keyword{keywordCount > 1 ? 's' : ''} · up to {keywordCount * maxPerKeyword} leads
+              {keywordCount} keyword{keywordCount > 1 ? 's' : ''}
             </span>
           ) : (
             <span className="text-xs text-slate-400 dark:text-slate-500">one per line or comma-separated</span>
@@ -108,30 +154,9 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
           rows={10}
           className="w-full px-4 py-3 rounded-xl border border-slate-200 dark:border-white/[0.08] bg-slate-50 dark:bg-white/[0.03] text-slate-900 dark:text-white placeholder-slate-400 dark:placeholder-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-500 focus:border-transparent text-sm font-mono resize-none transition-colors leading-relaxed"
         />
-      </div>
-
-      {/* Max results — segmented control */}
-      <div>
-        <label className="block text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
-          Results per keyword
-        </label>
-        <div className="grid grid-cols-4 gap-2">
-          {[20, 40, 60, 100].map(n => (
-            <button
-              key={n}
-              type="button"
-              onClick={() => setMaxPerKeyword(n)}
-              className={`py-2.5 rounded-xl text-sm font-semibold border transition-all ${
-                maxPerKeyword === n
-                  ? 'bg-indigo-600 border-indigo-600 text-white shadow-sm shadow-indigo-500/25'
-                  : 'border-slate-200 dark:border-white/[0.08] text-slate-500 dark:text-slate-400 hover:border-indigo-300 dark:hover:border-indigo-500/40 bg-white dark:bg-white/[0.03]'
-              }`}
-            >
-              {n}
-            </button>
-          ))}
-        </div>
-        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">Fetches multiple pages · duplicates are auto-skipped</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">
+          Fetches all available results · duplicates are auto-skipped
+        </p>
       </div>
 
       {/* Email scraping toggle */}
@@ -160,7 +185,7 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
             </div>
           </div>
           <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">
-            Visits each business website to find email addresses.
+            Visits each business website to find email addresses. Adds time per lead.
           </p>
         </div>
       </div>
@@ -185,7 +210,7 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
               {result.skipped} duplicate{result.skipped !== 1 ? 's' : ''} skipped
             </p>
           )}
-          {result.count === 0 && (
+          {result.count === 0 && result.skipped === 0 && (
             <p className="text-xs text-emerald-600 dark:text-emerald-500 mt-1 ml-6">
               Try different or more specific keywords
             </p>
@@ -193,62 +218,69 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
         </div>
       )}
 
-      {/* Progress block — shown while loading */}
+      {/* Live progress */}
       {loading && (
-        <div className="space-y-2.5">
+        <div className="space-y-3">
           {/* Progress bar */}
           <div className="h-1.5 w-full rounded-full bg-slate-100 dark:bg-white/[0.08] overflow-hidden">
             <div
-              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-1000 ease-linear"
-              style={{ width: `${progress}%` }}
+              className="h-full rounded-full bg-gradient-to-r from-indigo-500 to-violet-500 transition-all duration-700 ease-out"
+              style={{ width: `${barPct}%` }}
             />
           </div>
-          {/* Timing row */}
-          <div className="flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
-            <div className="flex items-center gap-1.5">
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500" />
-              <span>{scrapeEmails ? 'Searching + scraping emails…' : 'Searching Google Maps…'}</span>
+
+          {/* Status line */}
+          <div className="flex items-start justify-between gap-3 text-xs text-slate-500 dark:text-slate-400">
+            <div className="flex items-center gap-1.5 min-w-0">
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500 flex-shrink-0" />
+              <span className="truncate">
+                {progress?.phase === 'saving'
+                  ? 'Saving to Google Sheets…'
+                  : progress
+                    ? `${progress.phase === 'scraping' ? 'Scraping emails' : 'Searching'} ${progress.index + 1}/${progress.total}: ${progress.keyword}`
+                    : 'Starting…'}
+              </span>
             </div>
-            <div className="flex items-center gap-1 tabular font-medium">
+            <div className="flex items-center gap-1 tabular font-medium flex-shrink-0">
               <Clock className="w-3 h-3" />
-              <span>{fmtTime(elapsed)} elapsed</span>
-              {remaining > 0 && (
-                <span className="text-slate-400 dark:text-slate-500 ml-1">· ~{fmtTime(remaining)} left</span>
-              )}
+              <span>{elapsed}s elapsed</span>
             </div>
           </div>
+
+          {/* Counts + ETA row */}
+          {progress && progress.phase !== 'saving' && (
+            <div className="flex items-center justify-between text-xs">
+              <span className="text-slate-500 dark:text-slate-400">
+                <span className="font-semibold text-slate-700 dark:text-slate-200">{progress.totalSoFar}</span> leads found so far
+              </span>
+              {progress.etaMs > 0 && (
+                <span className="text-slate-400 dark:text-slate-500">
+                  ~{fmtTime(progress.etaMs)} remaining
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
 
       {/* Generate button */}
-      <div className="space-y-2">
-        <button
-          type="submit"
-          disabled={loading}
-          className="w-full flex items-center justify-center gap-2 py-3.5 px-6 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:from-indigo-700 active:to-violet-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all shadow-md shadow-indigo-500/20 text-sm"
-        >
-          {loading ? (
-            <>
-              <Loader2 className="w-4 h-4 animate-spin" />
-              Generating…
-            </>
-          ) : (
-            <>
-              <Zap className="w-4 h-4" />
-              Generate Leads
-            </>
-          )}
-        </button>
-
-        {/* Pre-flight ETA estimate */}
-        {!loading && keywordCount > 0 && (
-          <div className="flex items-center justify-center gap-1.5 text-xs text-slate-400 dark:text-slate-500">
-            <Clock className="w-3 h-3" />
-            <span>Estimated time: <span className="font-semibold text-slate-500 dark:text-slate-400">~{fmtTime(eta)}</span></span>
-            {scrapeEmails && <span className="text-amber-500 dark:text-amber-400">· includes email scraping</span>}
-          </div>
+      <button
+        type="submit"
+        disabled={loading}
+        className="w-full flex items-center justify-center gap-2 py-3.5 px-6 bg-gradient-to-r from-indigo-600 to-violet-600 hover:from-indigo-500 hover:to-violet-500 active:from-indigo-700 active:to-violet-700 disabled:opacity-60 disabled:cursor-not-allowed text-white font-semibold rounded-xl transition-all shadow-md shadow-indigo-500/20 text-sm"
+      >
+        {loading ? (
+          <>
+            <Loader2 className="w-4 h-4 animate-spin" />
+            Generating…
+          </>
+        ) : (
+          <>
+            <Zap className="w-4 h-4" />
+            Generate Leads
+          </>
         )}
-      </div>
+      </button>
 
     </form>
   )
