@@ -33,7 +33,7 @@ steps:
     waitFor: [push-backend]
 
 substitutions:
-  _FRONTEND_URL: https://placeholder.vercel.app
+  _FRONTEND_URL: https://lead-generation-mu-beige.vercel.app
 
 options:
   machineType: E2_HIGHCPU_8
