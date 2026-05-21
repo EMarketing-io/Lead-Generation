@@ -1,0 +1,21 @@
+{
+  "name": "lead-gen-backend",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "start": "node src/index.js",
+    "dev": "nodemon src/index.js"
+  },
+  "dependencies": {
+    "axios": "latest",
+    "bottleneck": "latest",
+    "cors": "latest",
+    "dotenv": "latest",
+    "express": "^5.2.1",
+    "google-auth-library": "latest",
+    "googleapis": "latest"
+  },
+  "devDependencies": {
+    "nodemon": "latest"
+  }
+}

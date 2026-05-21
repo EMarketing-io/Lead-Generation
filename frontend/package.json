@@ -1,0 +1,29 @@
+{
+  "name": "lead-gen-frontend",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "axios": "latest",
+    "lucide-react": "latest",
+    "next": "^16.2.6",
+    "next-themes": "latest",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "recharts": "latest"
+  },
+  "devDependencies": {
+    "@types/node": "latest",
+    "@types/react": "latest",
+    "@types/react-dom": "latest",
+    "autoprefixer": "latest",
+    "postcss": "latest",
+    "tailwindcss": "latest",
+    "typescript": "latest"
+  }
+}
