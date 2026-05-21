@@ -8,9 +8,10 @@ interface GeneratorFormProps {
   onLeadsGenerated?: (leads: Lead[]) => void
 }
 
-// ~1.5s per keyword for Maps API + 2.5s per lead for email scraping
+// ~0.3s per page (20 results) + 2.5s per lead for email scraping
 function calcEtaSeconds(keywordCount: number, maxPerKeyword: number, scrapeEmails: boolean) {
-  const mapsTime = keywordCount * 1.5
+  const pages = Math.ceil(maxPerKeyword / 20)
+  const mapsTime = keywordCount * pages * 0.8
   const emailTime = scrapeEmails ? keywordCount * maxPerKeyword * 2.5 : 0
   return Math.ceil(mapsTime + emailTime)
 }
@@ -114,8 +115,8 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
         <label className="block text-sm font-semibold text-slate-800 dark:text-slate-100 mb-2">
           Results per keyword
         </label>
-        <div className="grid grid-cols-3 gap-2">
-          {[5, 10, 20].map(n => (
+        <div className="grid grid-cols-4 gap-2">
+          {[20, 40, 60, 100].map(n => (
             <button
               key={n}
               type="button"
@@ -130,7 +131,7 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
             </button>
           ))}
         </div>
-        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">Max 20 per API call · duplicates are auto-skipped</p>
+        <p className="text-xs text-slate-400 dark:text-slate-500 mt-1.5">Fetches multiple pages · duplicates are auto-skipped</p>
       </div>
 
       {/* Email scraping toggle */}

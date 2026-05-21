@@ -2,12 +2,10 @@ const axios = require('axios');
 const { GoogleAuth } = require('google-auth-library');
 const path = require('path');
 
-// Cache the access token so we don't re-auth on every request
 let cachedToken = null;
 let tokenExpiry = 0;
 
-// Google Places API (New) allows ~10 requests/second; we throttle to 1 req/200ms
-const REQUEST_INTERVAL_MS = 200;
+const REQUEST_INTERVAL_MS = 300;
 
 async function getAccessToken() {
   if (cachedToken && Date.now() < tokenExpiry) return cachedToken;
@@ -20,43 +18,65 @@ async function getAccessToken() {
   const { token } = await client.getAccessToken();
 
   cachedToken = token;
-  tokenExpiry = Date.now() + 55 * 60 * 1000; // refresh 5 min before 1-hour expiry
+  tokenExpiry = Date.now() + 55 * 60 * 1000;
   return cachedToken;
 }
 
+// Fetches all paginated results for a single query up to maxResults
 async function searchPlaces(query, maxResults = 20) {
   const token = await getAccessToken();
+  const results = [];
+  let pageToken = null;
 
-  const response = await axios.post(
-    'https://places.googleapis.com/v1/places:searchText',
-    {
+  do {
+    const body = {
       textQuery: query,
-      maxResultCount: Math.min(maxResults, 20),
-    },
-    {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        'X-Goog-FieldMask':
-          'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri',
-        'Content-Type': 'application/json',
-      },
-    }
-  );
+      maxResultCount: 20, // API max per page
+    };
+    if (pageToken) body.pageToken = pageToken;
 
-  return (response.data.places || []).map(place => ({
-    timestamp: new Date().toISOString(),
-    businessName: place.displayName?.text || '',
-    phone: place.nationalPhoneNumber || '',
-    website: place.websiteUri || '',
-    email: '',
-    address: place.formattedAddress || '',
-    placeId: place.id,
-  }));
+    const response = await axios.post(
+      'https://places.googleapis.com/v1/places:searchText',
+      body,
+      {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          'X-Goog-FieldMask':
+            'places.id,places.displayName,places.formattedAddress,places.nationalPhoneNumber,places.websiteUri,nextPageToken',
+          'Content-Type': 'application/json',
+        },
+      }
+    );
+
+    const places = response.data.places || [];
+    for (const place of places) {
+      results.push({
+        timestamp: new Date().toISOString(),
+        businessName: place.displayName?.text || '',
+        phone: place.nationalPhoneNumber || '',
+        website: place.websiteUri || '',
+        email: '',
+        address: place.formattedAddress || '',
+        placeId: place.id,
+      });
+      if (results.length >= maxResults) break;
+    }
+
+    pageToken = response.data.nextPageToken || null;
+
+    // Required delay between paginated requests
+    if (pageToken && results.length < maxResults) {
+      await sleep(REQUEST_INTERVAL_MS);
+    }
+
+  } while (pageToken && results.length < maxResults);
+
+  return results;
 }
 
 async function searchMultipleKeywords(keywords, location = null, maxPerKeyword = 20) {
   const allLeads = [];
-  const seen = new Set(); // deduplicate by place ID
+  const seen = new Set();
 
   for (let i = 0; i < keywords.length; i++) {
     const kw = keywords[i].trim();
@@ -76,7 +96,6 @@ async function searchMultipleKeywords(keywords, location = null, maxPerKeyword =
       console.error(`Error searching "${kw}": ${err.message}`);
     }
 
-    // Respect Places API quota: 1 request per REQUEST_INTERVAL_MS
     if (i < keywords.length - 1) {
       await sleep(REQUEST_INTERVAL_MS);
     }
