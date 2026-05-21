@@ -1,6 +1,4 @@
 steps:
-  # ── BACKEND ──────────────────────────────────────────────
-
   - id: build-backend
     name: gcr.io/cloud-builders/docker
     args:
@@ -30,64 +28,12 @@ steps:
       - --image=asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/backend:$COMMIT_SHA
       - --region=asia-south1
       - --allow-unauthenticated
-      - --set-env-vars=SPREADSHEET_ID=1UVcBZgaDsrcZuTEEVS5rX9KSP7FY4wNte7_CwS7FHWQ,SERVICE_ACCOUNT_PATH=/secrets/service-account.json
+      - --set-env-vars=SPREADSHEET_ID=1UVcBZgaDsrcZuTEEVS5rX9KSP7FY4wNte7_CwS7FHWQ,SERVICE_ACCOUNT_PATH=/secrets/service-account.json,FRONTEND_URL=$_FRONTEND_URL
       - --set-secrets=/secrets/service-account.json=lead-gen-sa:latest
-      - --update-env-vars=FRONTEND_URL=$_FRONTEND_URL
     waitFor: [push-backend]
 
-  # Get backend URL and save for frontend build
-  - id: get-backend-url
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        URL=$(gcloud run services describe lead-gen-backend \
-          --region=asia-south1 \
-          --format='value(status.url)')
-        echo "Backend URL: $URL"
-        echo $URL > /workspace/backend_url.txt
-    waitFor: [deploy-backend]
-
-  # ── FRONTEND ─────────────────────────────────────────────
-
-  - id: build-frontend
-    name: gcr.io/cloud-builders/docker
-    entrypoint: bash
-    args:
-      - -c
-      - |
-        BACKEND_URL=$(cat /workspace/backend_url.txt)
-        docker build \
-          --platform=linux/amd64 \
-          --build-arg NEXT_PUBLIC_API_URL=$$BACKEND_URL \
-          -t asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/frontend:$COMMIT_SHA \
-          -t asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/frontend:latest \
-          ./frontend
-    waitFor: [get-backend-url]
-
-  - id: push-frontend
-    name: gcr.io/cloud-builders/docker
-    args:
-      - push
-      - --all-tags
-      - asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/frontend
-    waitFor: [build-frontend]
-
-  - id: deploy-frontend
-    name: gcr.io/google.com/cloudsdktool/cloud-sdk
-    entrypoint: gcloud
-    args:
-      - run
-      - deploy
-      - lead-gen-frontend
-      - --image=asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/frontend:$COMMIT_SHA
-      - --region=asia-south1
-      - --allow-unauthenticated
-    waitFor: [push-frontend]
-
 substitutions:
-  _FRONTEND_URL: https://lead-gen-frontend-placeholder.run.app
+  _FRONTEND_URL: https://placeholder.vercel.app
 
 options:
   machineType: E2_HIGHCPU_8
