@@ -19,26 +19,91 @@ function fmtTime(ms: number) {
 
 type ProgressEvent =
   | { type: 'searching'; keyword: string; index: number; total: number }
+  | { type: 'grid'; keyword: string; index: number; total: number; cellsDone: number; found: number }
   | { type: 'scraping'; keyword: string; index: number; total: number; count: number }
-  | { type: 'keyword_done'; keyword: string; index: number; total: number; found: number; totalSoFar: number; elapsedMs: number; etaMs: number }
+  | { type: 'keyword_done'; keyword: string; index: number; total: number; found: number; saved: number; skipped: number; totalSaved: number; totalSkipped: number; elapsedMs: number; etaMs: number; leads: Lead[] }
   | { type: 'keyword_error'; keyword: string; index: number; total: number; message: string }
-  | { type: 'saving' }
-  | { type: 'done'; saved: number; skipped: number; leads: Lead[] }
-  | { type: 'error'; message: string }
+  | { type: 'saving'; keyword: string; index: number; total: number }
+  | { type: 'done'; saved: number; skipped: number }
+  | { type: 'error'; keyword?: string; message: string }
+
+type ProgressState = {
+  index: number
+  total: number
+  keyword: string
+  phase: string
+  totalSoFar: number
+  etaMs: number
+  cells: number
+}
+
+// Runs ONE keyword's grid search over a short-lived SSE request and resolves with
+// what was saved. Display index/total come from the client-side loop (the request
+// itself only knows about this single keyword).
+async function runKeyword(
+  keyword: string,
+  index: number,
+  total: number,
+  scrapeEmails: boolean,
+  etaMs: number,
+  setProgress: React.Dispatch<React.SetStateAction<ProgressState | null>>,
+): Promise<{ saved: number; skipped: number; leads: Lead[] }> {
+  setProgress({ index, total, keyword, phase: 'searching', totalSoFar: 0, etaMs, cells: 0 })
+
+  const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/leads/generate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ keywords: [keyword], scrapeEmails }),
+  })
+
+  if (!res.ok || !res.body) {
+    const data = await res.json().catch(() => ({ error: 'Request failed' }))
+    throw new Error(data.error || 'Failed to generate leads')
+  }
+
+  const reader = res.body.getReader()
+  const decoder = new TextDecoder()
+  let buffer = ''
+  let result: { saved: number; skipped: number; leads: Lead[] } | null = null
+
+  while (true) {
+    const { done, value } = await reader.read()
+    if (done) break
+    buffer += decoder.decode(value, { stream: true })
+
+    const lines = buffer.split('\n')
+    buffer = lines.pop() ?? ''
+
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue
+      let evt: ProgressEvent
+      try { evt = JSON.parse(line.slice(6)) } catch { continue }
+
+      if (evt.type === 'grid') {
+        setProgress(p => p ? { ...p, phase: 'scanning', cells: evt.cellsDone, totalSoFar: evt.found } : p)
+      } else if (evt.type === 'scraping') {
+        setProgress(p => p ? { ...p, phase: 'scraping' } : p)
+      } else if (evt.type === 'saving') {
+        setProgress(p => p ? { ...p, phase: 'saving' } : p)
+      } else if (evt.type === 'keyword_done') {
+        result = { saved: evt.saved, skipped: evt.skipped, leads: evt.leads }
+        setProgress(p => p ? { ...p, phase: 'done', totalSoFar: evt.found } : p)
+      } else if (evt.type === 'keyword_error') {
+        throw new Error(evt.message)
+      }
+    }
+  }
+
+  if (!result) throw new Error('Connection closed before the keyword finished')
+  return result
+}
 
 export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) {
   const [keywords, setKeywords] = useState('')
   const [scrapeEmails, setScrapeEmails] = useState(false)
   const [loading, setLoading] = useState(false)
   const [elapsed, setElapsed] = useState(0)
-  const [progress, setProgress] = useState<{
-    index: number
-    total: number
-    keyword: string
-    phase: string
-    totalSoFar: number
-    etaMs: number
-  } | null>(null)
+  const [progress, setProgress] = useState<ProgressState | null>(null)
   const [result, setResult] = useState<{ count: number; skipped: number } | null>(null)
   const [error, setError] = useState<string | null>(null)
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null)
@@ -70,57 +135,46 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
     setResult(null)
     setProgress(null)
 
+    // Drive the keyword list from the client — ONE request per keyword. This keeps
+    // every HTTP request short (one keyword's grid search), so long lists never hit
+    // Cloud Run's request timeout. Each keyword is saved server-side as it finishes,
+    // so a failure only affects that keyword and earlier work is already persisted.
+    const total = keywordList.length
+    const collected: Lead[] = []
+    let totalSaved = 0
+    let totalSkipped = 0
+    const failed: string[] = []
+    const durations: number[] = [] // ms per completed keyword, for ETA across the list
+
     try {
-      const res = await fetch(`${process.env.NEXT_PUBLIC_API_URL}/api/leads/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keywords: keywordList, scrapeEmails }),
-      })
-
-      if (!res.ok || !res.body) {
-        const data = await res.json().catch(() => ({ error: 'Request failed' }))
-        throw new Error(data.error || 'Failed to generate leads')
-      }
-
-      const reader = res.body.getReader()
-      const decoder = new TextDecoder()
-      let buffer = ''
-
-      while (true) {
-        const { done, value } = await reader.read()
-        if (done) break
-        buffer += decoder.decode(value, { stream: true })
-
-        const lines = buffer.split('\n')
-        buffer = lines.pop() ?? ''
-
-        for (const line of lines) {
-          if (!line.startsWith('data: ')) continue
-          let evt: ProgressEvent
-          try { evt = JSON.parse(line.slice(6)) } catch { continue }
-
-          if (evt.type === 'searching') {
-            setProgress({ index: evt.index, total: evt.total, keyword: evt.keyword, phase: 'searching', totalSoFar: 0, etaMs: 0 })
-          } else if (evt.type === 'scraping') {
-            setProgress(p => p ? { ...p, phase: 'scraping' } : p)
-          } else if (evt.type === 'keyword_done') {
-            setProgress({ index: evt.index, total: evt.total, keyword: evt.keyword, phase: 'done', totalSoFar: evt.totalSoFar, etaMs: evt.etaMs })
-          } else if (evt.type === 'keyword_error') {
-            setProgress(p => p ? { ...p, phase: 'error' } : p)
-          } else if (evt.type === 'saving') {
-            setProgress(p => p ? { ...p, phase: 'saving' } : p)
-          } else if (evt.type === 'done') {
-            setResult({ count: evt.saved, skipped: evt.skipped })
-            onLeadsGenerated?.(evt.leads)
-            setProgress(null)
-          } else if (evt.type === 'error') {
-            setError(evt.message)
-          }
+      for (let i = 0; i < keywordList.length; i++) {
+        const keyword = keywordList[i]
+        const avgMs = durations.length ? durations.reduce((a, b) => a + b, 0) / durations.length : 0
+        const etaMs = Math.round(avgMs * (total - i))
+        const started = Date.now()
+        try {
+          const r = await runKeyword(keyword, i, total, scrapeEmails, etaMs, setProgress)
+          totalSaved += r.saved
+          totalSkipped += r.skipped
+          collected.push(...r.leads)
+        } catch (err: any) {
+          // A single keyword failing (timeout, network, server error) shouldn't abort
+          // the whole run — record it and move on.
+          console.error(`Keyword "${keyword}" failed:`, err)
+          failed.push(keyword)
+          setProgress(p => p ? { ...p, phase: 'error' } : p)
+        } finally {
+          durations.push(Date.now() - started)
         }
       }
-    } catch (err: any) {
-      setError(err.message)
+
+      setResult({ count: totalSaved, skipped: totalSkipped })
+      if (collected.length > 0) onLeadsGenerated?.(collected)
+      if (failed.length > 0) {
+        setError(`${failed.length} keyword${failed.length > 1 ? 's' : ''} failed (saved progress is kept): ${failed.join(', ')}`)
+      }
     } finally {
+      setProgress(null)
       setLoading(false)
     }
   }
@@ -235,9 +289,9 @@ export default function GeneratorForm({ onLeadsGenerated }: GeneratorFormProps) 
               <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-500 flex-shrink-0" />
               <span className="truncate">
                 {progress?.phase === 'saving'
-                  ? 'Saving to Google Sheets…'
+                  ? `Saving to Google Sheets… (${progress.index + 1}/${progress.total})`
                   : progress
-                    ? `${progress.phase === 'scraping' ? 'Scraping emails' : 'Searching'} ${progress.index + 1}/${progress.total}: ${progress.keyword}`
+                    ? `${progress.phase === 'scraping' ? 'Scraping emails' : progress.phase === 'scanning' ? `Scanning grid (${progress.cells} cells)` : 'Searching'} ${progress.index + 1}/${progress.total}: ${progress.keyword}`
                     : 'Starting…'}
               </span>
             </div>

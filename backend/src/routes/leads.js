@@ -27,8 +27,9 @@ router.post('/generate', async (req, res) => {
     res.write(`data: ${JSON.stringify(data)}\n\n`);
   }
 
-  const allLeads = [];
   const kwDurations = []; // actual ms per completed keyword (for ETA calc)
+  let totalSaved = 0;
+  let totalSkipped = 0;
 
   for (let i = 0; i < keywords.length; i++) {
     const keyword = keywords[i];
@@ -38,7 +39,11 @@ router.post('/generate', async (req, res) => {
 
     let found = [];
     try {
-      found = await searchPlaces(keyword);
+      // Adaptive grid search — streams cell-by-cell progress as it tiles the area.
+      found = await searchPlaces(keyword, (p) => {
+        send({ type: 'grid', keyword, index: i, total: keywords.length, cellsDone: p.cellsDone, found: p.found });
+      });
+      found.forEach(lead => { lead.keyword = keyword; });
     } catch (err) {
       console.error(`searchPlaces error for "${keyword}":`, err.message);
       send({ type: 'keyword_error', keyword, index: i, total: keywords.length, message: err.message });
@@ -56,7 +61,23 @@ router.post('/generate', async (req, res) => {
       }
     }
 
-    allLeads.push(...found);
+    // Save THIS keyword's leads immediately, so a timeout or crash mid-run never
+    // loses already-completed keywords.
+    send({ type: 'saving', keyword, index: i, total: keywords.length });
+    let saved = 0;
+    let skipped = 0;
+    try {
+      if (found.length > 0) {
+        const result = await appendLeads(found);
+        saved = result.saved;
+        skipped = result.skipped;
+      }
+    } catch (err) {
+      console.error(`appendLeads error for "${keyword}":`, err.message);
+      send({ type: 'error', keyword, message: `Failed to save leads: ${err.message}` });
+    }
+    totalSaved += saved;
+    totalSkipped += skipped;
 
     const elapsed = Date.now() - kwStart;
     kwDurations.push(elapsed);
@@ -70,30 +91,19 @@ router.post('/generate', async (req, res) => {
       index: i,
       total: keywords.length,
       found: found.length,
-      totalSoFar: allLeads.length,
+      saved,
+      skipped,
+      totalSaved,
+      totalSkipped,
       elapsedMs: elapsed,
       etaMs,
+      leads: found,
     });
 
     if (i < keywords.length - 1) await sleep(KEYWORD_DELAY_MS);
   }
 
-  send({ type: 'saving' });
-
-  let saved = 0;
-  let skipped = 0;
-  try {
-    if (allLeads.length > 0) {
-      const result = await appendLeads(allLeads);
-      saved = result.saved;
-      skipped = result.skipped;
-    }
-  } catch (err) {
-    console.error('appendLeads error:', err.message);
-    send({ type: 'error', message: `Failed to save leads: ${err.message}` });
-  }
-
-  send({ type: 'done', saved, skipped, leads: allLeads });
+  send({ type: 'done', saved: totalSaved, skipped: totalSkipped });
   res.end();
 });
 

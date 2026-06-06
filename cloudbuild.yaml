@@ -28,6 +28,7 @@ steps:
       - --image=asia-south1-docker.pkg.dev/arcane-firefly-465906-h7/lead-gen/backend:$COMMIT_SHA
       - --region=asia-south1
       - --allow-unauthenticated
+      - --timeout=3600
       - --set-env-vars=SPREADSHEET_ID=1UVcBZgaDsrcZuTEEVS5rX9KSP7FY4wNte7_CwS7FHWQ,SERVICE_ACCOUNT_PATH=/secrets/service-account.json,FRONTEND_URL=$_FRONTEND_URL
       - --set-secrets=/secrets/service-account.json=lead-gen-sa:latest
     waitFor: [push-backend]
